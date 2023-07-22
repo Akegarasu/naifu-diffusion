@@ -4,12 +4,13 @@ import torch
 
 from io import BytesIO
 from typing import Optional
+from pathlib import Path
 
 from omegaconf import OmegaConf
 import requests
 import torch
 from transformers import (
-    CLIPTextModel, 
+    CLIPTextModel,
     CLIPTextConfig,
     CLIPTokenizer
 )
@@ -40,14 +41,14 @@ def get_world_size() -> int:
     # if config is not None and config.lightning.accelerator == "tpu":
     #     import torch_xla.core.xla_model as xm
     #     return xm.xrt_world_size()
-    
+
     return int(os.environ.get("WORLD_SIZE", 1))
 
 def get_local_rank() -> int:
     # if config.lightning.accelerator == "tpu":
     #     import torch_xla.core.xla_model as xm
     #     return xm.get_ordinal()
-    
+
     return int(os.environ.get("LOCAL_RANK", -1))
 
 def state_dict_key_replace(state_dict, keys_to_replace):
@@ -77,7 +78,7 @@ def convert_to_sd(state_dict):
     unet_state_dict = {k.replace("unet.", "", 1): v for k, v in state_dict.items() if k.startswith("unet")}
     vae_state_dict = {k.replace("vae.", "", 1): v for k, v in state_dict.items() if k.startswith("vae")}
     text_enc_dict = {k.replace("text_encoder.", "", 1): v for k, v in state_dict.items() if k.startswith("text_encoder")}
-        
+
     # Convert the UNet model
     unet_state_dict = diffusers_convert.convert_unet_state_dict(unet_state_dict)
     unet_state_dict = {"model.diffusion_model." + k: v for k, v in unet_state_dict.items()}
@@ -105,7 +106,7 @@ def convert_to_df(checkpoint, return_pipe=False):
     key_name_v2_1 = "model.diffusion_model.input_blocks.2.1.transformer_blocks.0.attn2.to_k.weight"
     key_name_sd_xl_base = "conditioner.embedders.1.model.transformer.resblocks.9.mlp.c_proj.bias"
     key_name_sd_xl_refiner = "conditioner.embedders.0.model.transformer.resblocks.9.mlp.c_proj.bias"
-    
+
     global_step = None
     if "global_step" in checkpoint:
         global_step = checkpoint["global_step"]
@@ -127,7 +128,13 @@ def convert_to_df(checkpoint, return_pipe=False):
         # only refiner xl has embedder and one text embedders
         config_url = "https://raw.githubusercontent.com/Stability-AI/generative-models/main/configs/inference/sd_xl_refiner.yaml"
 
-    original_config_file = BytesIO(requests.get(config_url).content)
+    local_config = Path(__file__).parent / "sd-config" / config_url.split("/")[-1]
+    if os.path.exists(local_config):
+        with open(local_config, "rb") as f:
+            original_config_file = BytesIO(f.read())
+    else:
+        original_config_file = BytesIO(requests.get(config_url).content)
+
     original_config = OmegaConf.load(original_config_file)
 
     # Convert the text model.
@@ -196,16 +203,16 @@ def convert_to_df(checkpoint, return_pipe=False):
                 if "text_model" not in dest_key:
                     dest_key = f"text_model.{dest_key}"
                 text_model_dict[dest_key] = checkpoint[key]
-        
+
         text_model = CLIPTextModel(CLIPTextConfig.from_pretrained("openai/clip-vit-large-patch14"))
         tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
         if "text_model.embeddings.position_ids" not in text_model.state_dict().keys() \
             and "text_model.embeddings.position_ids" in text_model_dict.keys():
-            del text_model_dict["text_model.embeddings.position_ids"] 
+            del text_model_dict["text_model.embeddings.position_ids"]
 
         if len(text_model_dict) < 10:
             text_model = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14")
-    
+
     if not return_pipe:
         return converted_unet_checkpoint, converted_vae_checkpoint, text_model_dict
     else:
